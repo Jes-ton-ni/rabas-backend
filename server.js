@@ -123,6 +123,42 @@ app.get('/api/businesses', async (req, res) => {
     }
 });
 
+// Endpoint to get all business products
+app.get('/api/getAllBusinessProducts', async (req, res) => {
+    try {
+        const sql = `
+            SELECT 
+                products.*, 
+                MAX(COALESCE(deals.discount, 0)) AS discount, 
+                MAX(COALESCE(deals.expirationDate, 'No Expiration')) AS expiration
+            FROM 
+                products
+            LEFT JOIN 
+                deals 
+            ON 
+                products.product_id = deals.product_id
+            GROUP BY 
+                products.product_id
+            ORDER BY 
+                expiration DESC
+            LIMIT 0, 1000
+        `;
+
+        const [results] = await req.db.query(sql);
+        
+        res.json({
+            success: true,
+            businessProducts: results.length > 0 ? results : []
+        });
+    } catch (err) {
+        console.error('Error fetching business products:', err);
+        res.status(500).json({ 
+            success: false, 
+            message: 'Internal server error' 
+        });
+    }
+});
+
 app.get('/api/businesses/:id', async (req, res) => {
     try {
         const [businesses] = await req.db.query(
@@ -176,12 +212,33 @@ app.get('/api/business-applications', async (req, res) => {
 
 app.get('/api/allUsers', async (req, res) => {
     try {
-        const [users] = await req.db.query('SELECT * FROM users');
-        console.log(users);
-        res.json(users);
+        // Verify database connection
+        if (!req.db) {
+            console.error('Database connection not available');
+            return res.status(500).json({ 
+                error: 'Database connection not available',
+                details: 'Connection not established'
+            });
+        }
+
+        const [users] = await req.db.query('SELECT user_id, username, email FROM users');
+        console.log('Successfully fetched users:', users.length);
+        
+        res.json({
+            success: true,
+            users: users
+        });
     } catch (err) {
-        console.error('Error fetching users:', err);
-        res.status(500).json({ error: 'Failed to fetch users' });
+        console.error('Error fetching users:', {
+            message: err.message,
+            code: err.code,
+            state: err.sqlState
+        });
+        
+        res.status(500).json({ 
+            error: 'Failed to fetch users',
+            details: err.message
+        });
     }
 });
 
