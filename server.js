@@ -39,13 +39,24 @@ app.use(async (req, res, next) => {
             if (!req.db) {
                 console.log('Establishing database connection for request...');
                 const pool = await getPool();
-                if (!pool) {
-                    throw new Error('Failed to get database connection');
+                
+                // Safely remove existing error listeners if they exist
+                if (pool && pool.listenerCount('error') > 0) {
+                    pool.removeAllListeners('error');
                 }
                 
-                // Test the connection
-                await pool.query('SELECT 1');
+                // Add new error handler
+                if (pool) {
+                    pool.on('error', async (err) => {
+                        console.error('Database connection error:', err);
+                        req.db = null;
+                    });
+                }
+
                 req.db = pool;
+                
+                // Test the connection
+                await req.db.query('SELECT 1');
             }
             return next();
         } catch (err) {
@@ -180,7 +191,7 @@ app.get('/api/getAllBusinessProducts', async (req, res) => {
             `;
 
             const [results] = await req.db.query(sql);
-            
+            console.log('Successfully fetched business products:', results.length);
             return res.json({
                 success: true,
                 businessProducts: results.length > 0 ? results : []
