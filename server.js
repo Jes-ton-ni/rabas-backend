@@ -1,7 +1,7 @@
 require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
-const { getPool } = require('./db/connection');
+const { getPool, closeConnections } = require('./db/connection');
 const EventEmitter = require('events');
 EventEmitter.defaultMaxListeners = 15; // Increase global limit if needed
 
@@ -233,16 +233,55 @@ app.post('/api/business-applications', async (req, res) => {
 });
 
 app.get('/api/business-applications', async (req, res) => {
-    try {
-        const [applications] = await req.db.query(`
-            SELECT ba.*, b.name as business_name 
-            FROM business_applications ba 
-            JOIN businesses b ON ba.business_id = b.id
-        `);
-        res.json(applications);
-    } catch (err) {
-        console.error('Error fetching applications:', err);
-        res.status(500).json({ error: 'Failed to fetch applications' });
+    const maxRetries = 3;
+    let attempt = 0;
+
+    while (attempt < maxRetries) {
+        try {
+            // Get a connection from the pool
+            if (!req.db) {
+                req.db = await getPool();
+            }
+
+            const [applications] = await req.db.query(`
+                SELECT 
+                    ba.*, 
+                    b.name as business_name 
+                FROM 
+                    business_applications ba 
+                JOIN 
+                    businesses b ON ba.business_id = b.id
+                ORDER BY 
+                    ba.created_at DESC
+            `);
+
+            return res.json({
+                success: true,
+                applications: applications
+            });
+
+        } catch (err) {
+            attempt++;
+            console.error(`Error fetching applications (attempt ${attempt}/${maxRetries}):`, {
+                message: err.message,
+                code: err.code,
+                state: err.sqlState
+            });
+
+            // Reset connection on error
+            req.db = null;
+
+            if (attempt === maxRetries) {
+                return res.status(500).json({
+                    success: false,
+                    error: 'Failed to fetch applications',
+                    details: err.message
+                });
+            }
+
+            // Wait before retrying with exponential backoff
+            await new Promise(resolve => setTimeout(resolve, 1000 * Math.pow(2, attempt)));
+        }
     }
 });
 
@@ -252,13 +291,13 @@ app.get('/api/allUsers', async (req, res) => {
 
     while (attempt < maxRetries) {
         try {
-            if (!req.db) {
-                req.db = await getPool();
-            }
+            // Get a connection from the pool
+            const db = await getPool();
 
-            const [users] = await req.db.query('SELECT user_id, username, email FROM users');
+            // Fetch users
+            const [users] = await db.query('SELECT user_id, username, email FROM users');
             console.log('Successfully fetched users:', users.length);
-            
+
             return res.json({
                 success: true,
                 users: users
@@ -272,15 +311,14 @@ app.get('/api/allUsers', async (req, res) => {
                 state: err.sqlState
             });
 
-            req.db = null;
-
             if (attempt === maxRetries) {
-                return res.status(500).json({ 
+                return res.status(500).json({
                     error: 'Failed to fetch users',
                     details: err.message
                 });
             }
 
+            // Wait before retrying
             await new Promise(resolve => setTimeout(resolve, 1000 * attempt));
         }
     }
@@ -300,8 +338,7 @@ app.listen(PORT, () => {
 // Graceful shutdown
 process.on('SIGINT', async () => {
     console.log('Shutting down...');
-    const { closePool } = require('./db/connection');
-    await closePool();
+    await closeConnections();
     console.log('Database connections closed');
     process.exit(0);
 });
