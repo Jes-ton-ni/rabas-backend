@@ -54,6 +54,92 @@ app.use(async (req, res, next) => {
     }
 });
 
+
+
+
+
+
+// Endpoint to get all business products
+app.get('/api/getAllBusinessProducts', async (req, res) => {
+    const maxRetries = 3;
+    let attempt = 0;
+
+    while (attempt < maxRetries) {
+        try {
+            if (!req.db) {
+                req.db = await getPool();
+            }
+
+            const sql = `
+                SELECT 
+                    products.*, 
+                    MAX(COALESCE(deals.discount, 0)) AS discount, 
+                    MAX(COALESCE(deals.expirationDate, 'No Expiration')) AS expiration
+                FROM 
+                    products
+                LEFT JOIN 
+                    deals 
+                ON 
+                    products.product_id = deals.product_id
+                GROUP BY 
+                    products.product_id
+                ORDER BY 
+                    expiration DESC
+                LIMIT 0, 1000
+            `;
+
+            const [results] = await req.db.query(sql);
+            console.log('Successfully fetched business products:', results.length);
+            
+            return res.json({
+                success: true,
+                businessProducts: results.length > 0 ? results : []
+            });
+        } catch (err) {
+            attempt++;
+            console.error(`Error fetching business products (attempt ${attempt}/${maxRetries}):`, {
+                message: err.message,
+                code: err.code,
+                state: err.sqlState
+            });
+
+            // Reset connection on error
+            req.db = null;
+
+            if (attempt === maxRetries) {
+                return res.status(500).json({ 
+                    success: false, 
+                    message: 'Internal server error',
+                    details: err.message
+                });
+            }
+
+            // Wait before retrying with exponential backoff
+            await new Promise(resolve => setTimeout(resolve, 1000 * Math.pow(2, attempt)));
+        }
+    }
+});
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 // User Routes
 app.post('/api/users/register', async (req, res) => {
     try {
@@ -132,67 +218,6 @@ app.get('/api/businesses', async (req, res) => {
     } catch (err) {
         console.error('Error fetching businesses:', err);
         res.status(500).json({ error: 'Failed to fetch businesses' });
-    }
-});
-
-// Endpoint to get all business products
-app.get('/api/getAllBusinessProducts', async (req, res) => {
-    const maxRetries = 3;
-    let attempt = 0;
-
-    while (attempt < maxRetries) {
-        try {
-            if (!req.db) {
-                req.db = await getPool();
-            }
-
-            const sql = `
-                SELECT 
-                    products.*, 
-                    MAX(COALESCE(deals.discount, 0)) AS discount, 
-                    MAX(COALESCE(deals.expirationDate, 'No Expiration')) AS expiration
-                FROM 
-                    products
-                LEFT JOIN 
-                    deals 
-                ON 
-                    products.product_id = deals.product_id
-                GROUP BY 
-                    products.product_id
-                ORDER BY 
-                    expiration DESC
-                LIMIT 0, 1000
-            `;
-
-            const [results] = await req.db.query(sql);
-            console.log('Successfully fetched business products:', results.length);
-            
-            return res.json({
-                success: true,
-                businessProducts: results.length > 0 ? results : []
-            });
-        } catch (err) {
-            attempt++;
-            console.error(`Error fetching business products (attempt ${attempt}/${maxRetries}):`, {
-                message: err.message,
-                code: err.code,
-                state: err.sqlState
-            });
-
-            // Reset connection on error
-            req.db = null;
-
-            if (attempt === maxRetries) {
-                return res.status(500).json({ 
-                    success: false, 
-                    message: 'Internal server error',
-                    details: err.message
-                });
-            }
-
-            // Wait before retrying with exponential backoff
-            await new Promise(resolve => setTimeout(resolve, 1000 * Math.pow(2, attempt)));
-        }
     }
 });
 
