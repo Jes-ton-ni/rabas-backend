@@ -2,18 +2,18 @@ const mysql = require('mysql2/promise');
 const { Client } = require('ssh2');
 
 const sshConfig = {
-    host: '153.92.11.26',
-    port: 65002,
-    username: 'u856995433',
-    password: '@Rabas12345'
+    host: process.env.SSH_HOST,
+    port: process.env.SSH_PORT,
+    username: process.env.SSH_USER,
+    password: process.env.SSH_PASSWORD
 };
 
 const dbConfig = {
-    host: '127.0.0.1',
-    user: 'u856995433_root',
-    password: 'Rabas12345',
-    database: 'u856995433_rabas',
-    port: 3306
+    host: process.env.DB_HOST,
+    user: process.env.DB_USER,
+    password: process.env.DB_PASSWORD,
+    database: process.env.DB_DATABASE,
+    port: process.env.DB_PORT
 };
 
 let globalPool = null;
