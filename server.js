@@ -31,26 +31,41 @@ getPool()
 
 // Database middleware
 app.use(async (req, res, next) => {
-    try {
-        if (!req.db) {
-            console.log('Establishing database connection for request...');
-            const pool = await getPool();
-            
-            // Remove existing listeners before adding new ones
-            pool.removeAllListeners('error');
-            
-            // Add single error handler
-            pool.on('error', async (err) => {
-                console.error('Database connection error:', err);
-                req.db = null;
-            });
+    const maxRetries = 3;
+    let attempt = 0;
 
-            req.db = pool;
+    while (attempt < maxRetries) {
+        try {
+            if (!req.db) {
+                console.log('Establishing database connection for request...');
+                const pool = await getPool();
+                if (!pool) {
+                    throw new Error('Failed to get database connection');
+                }
+                
+                // Test the connection
+                await pool.query('SELECT 1');
+                req.db = pool;
+            }
+            return next();
+        } catch (err) {
+            attempt++;
+            console.error(`Database middleware error (attempt ${attempt}/${maxRetries}):`, err);
+            
+            // Clear the failed connection
+            req.db = null;
+
+            if (attempt === maxRetries) {
+                return res.status(503).json({ 
+                    success: false, 
+                    message: 'Database connection failed',
+                    details: process.env.NODE_ENV === 'development' ? err.message : undefined
+                });
+            }
+
+            // Wait before retrying
+            await new Promise(resolve => setTimeout(resolve, 1000 * Math.pow(2, attempt)));
         }
-        next();
-    } catch (err) {
-        console.error('Database middleware error:', err);
-        res.status(500).json({ error: 'Database connection failed' });
     }
 });
 
