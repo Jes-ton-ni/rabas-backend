@@ -174,6 +174,17 @@ app.get('/api/business-applications', async (req, res) => {
     }
 });
 
+app.get('/api/allUsers', async (req, res) => {
+    try {
+        const [users] = await req.db.query('SELECT * FROM users');
+        console.log(users);
+        res.json(users);
+    } catch (err) {
+        console.error('Error fetching users:', err);
+        res.status(500).json({ error: 'Failed to fetch users' });
+    }
+});
+
 // Error handling middleware
 app.use((err, req, res, next) => {
     console.error('Global error handler:', err);
