@@ -5,7 +5,7 @@ const { getPool, closeConnections } = require('./db/connection');
 const EventEmitter = require('events');
 EventEmitter.defaultMaxListeners = 15; // Increase global limit if needed
 
-const PORT = process.env.PORT || 3000;
+const PORT = process.env.PORT || 5000;
 const app = express();
 
 // Middleware
@@ -233,55 +233,16 @@ app.post('/api/business-applications', async (req, res) => {
 });
 
 app.get('/api/business-applications', async (req, res) => {
-    const maxRetries = 3;
-    let attempt = 0;
-
-    while (attempt < maxRetries) {
-        try {
-            // Get a connection from the pool
-            if (!req.db) {
-                req.db = await getPool();
-            }
-
-            const [applications] = await req.db.query(`
-                SELECT 
-                    ba.*, 
-                    b.name as business_name 
-                FROM 
-                    business_applications ba 
-                JOIN 
-                    businesses b ON ba.business_id = b.id
-                ORDER BY 
-                    ba.created_at DESC
-            `);
-
-            return res.json({
-                success: true,
-                applications: applications
-            });
-
-        } catch (err) {
-            attempt++;
-            console.error(`Error fetching applications (attempt ${attempt}/${maxRetries}):`, {
-                message: err.message,
-                code: err.code,
-                state: err.sqlState
-            });
-
-            // Reset connection on error
-            req.db = null;
-
-            if (attempt === maxRetries) {
-                return res.status(500).json({
-                    success: false,
-                    error: 'Failed to fetch applications',
-                    details: err.message
-                });
-            }
-
-            // Wait before retrying with exponential backoff
-            await new Promise(resolve => setTimeout(resolve, 1000 * Math.pow(2, attempt)));
-        }
+    try {
+        const [applications] = await req.db.query(`
+            SELECT ba.*, b.name as business_name 
+            FROM business_applications ba 
+            JOIN businesses b ON ba.business_id = b.id
+        `);
+        res.json(applications);
+    } catch (err) {
+        console.error('Error fetching applications:', err);
+        res.status(500).json({ error: 'Failed to fetch applications' });
     }
 });
 
