@@ -31,52 +31,26 @@ getPool()
 
 // Database middleware
 app.use(async (req, res, next) => {
-    const maxRetries = 3;
-    let attempt = 0;
-
-    while (attempt < maxRetries) {
-        try {
-            if (!req.db) {
-                console.log('Establishing database connection for request...');
-                const pool = await getPool();
-                
-                // Safely remove existing error listeners if they exist
-                if (pool && pool.listenerCount('error') > 0) {
-                    pool.removeAllListeners('error');
-                }
-                
-                // Add new error handler
-                if (pool) {
-                    pool.on('error', async (err) => {
-                        console.error('Database connection error:', err);
-                        req.db = null;
-                    });
-                }
-
-                req.db = pool;
-                
-                // Test the connection
-                await req.db.query('SELECT 1');
-            }
-            return next();
-        } catch (err) {
-            attempt++;
-            console.error(`Database middleware error (attempt ${attempt}/${maxRetries}):`, err);
+    try {
+        if (!req.db) {
+            console.log('Establishing database connection for request...');
+            const pool = await getPool();
             
-            // Clear the failed connection
-            req.db = null;
+            // Remove existing listeners before adding new ones
+            pool.removeAllListeners('error');
+            
+            // Add single error handler
+            pool.on('error', async (err) => {
+                console.error('Database connection error:', err);
+                req.db = null;
+            });
 
-            if (attempt === maxRetries) {
-                return res.status(503).json({ 
-                    success: false, 
-                    message: 'Database connection failed',
-                    details: process.env.NODE_ENV === 'development' ? err.message : undefined
-                });
-            }
-
-            // Wait before retrying
-            await new Promise(resolve => setTimeout(resolve, 1000 * Math.pow(2, attempt)));
+            req.db = pool;
         }
+        next();
+    } catch (err) {
+        console.error('Database middleware error:', err);
+        res.status(500).json({ error: 'Database connection failed' });
     }
 });
 
@@ -192,6 +166,7 @@ app.get('/api/getAllBusinessProducts', async (req, res) => {
 
             const [results] = await req.db.query(sql);
             console.log('Successfully fetched business products:', results.length);
+            
             return res.json({
                 success: true,
                 businessProducts: results.length > 0 ? results : []
