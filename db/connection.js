@@ -1,104 +1,110 @@
 const mysql = require('mysql2/promise');
 const { Client } = require('ssh2');
-const NodeCache = require("node-cache");
-
-const sshConfig = {
-    host: process.env.SSH_HOST,
-    port: process.env.SSH_PORT,
-    username: process.env.SSH_USER,
-    password: process.env.SSH_PASSWORD,
-    keepaliveInterval: 10000,
-    keepaliveCountMax: 5,
-};
-
-const dbConfig = {
-    host: process.env.DB_HOST,
-    user: process.env.DB_USER,
-    password: process.env.DB_PASSWORD,
-    database: process.env.DB_DATABASE,
-    port: process.env.DB_PORT,
-    connectTimeout: 10000,
-};
 
 let globalPool = null;
 let sshConnection = null;
+let isConnecting = false;
+let reconnectTimeout = null;
 
-// Cache for frequently requested data to reduce database load
-const cache = new NodeCache({ stdTTL: 10, checkperiod: 12 }); // Cache for 10 seconds
+const RETRY_DELAY = 5000; // 5 seconds
+const MAX_RETRIES = 3;
 
-const createSSHTunnel = async (retries = 3) => {
-    for (let attempt = 0; attempt < retries; attempt++) {
-        try {
-            // Close existing connection if any
-            if (sshConnection) {
-                sshConnection.end();
-                sshConnection = null;
-            }
+const createSSHTunnel = async (retryCount = 0) => {
+    if (isConnecting) {
+        console.log('Connection attempt already in progress...');
+        return null;
+    }
 
-            sshConnection = new Client();
+    try {
+        isConnecting = true;
 
-            // Create new SSH connection
-            await new Promise((resolve, reject) => {
-                sshConnection
-                    .on('ready', () => {
-                        console.log('SSH Connection established');
-                        resolve();
-                    })
-                    .on('error', (err) => {
-                        console.error(`SSH Connection error (attempt ${attempt + 1}/${retries}):`, err);
-                        reject(err);
-                    })
-                    .on('end', () => {
-                        console.log('SSH Connection ended');
-                    })
-                    .connect({
-                        host: process.env.SSH_HOST,
-                        port: parseInt(process.env.SSH_PORT),
-                        username: process.env.SSH_USER,
-                        password: process.env.SSH_PASSWORD,
-                        keepaliveInterval: 10000,
-                        keepaliveCountMax: 3,
-                        readyTimeout: 30000
-                    });
-            });
-
-            // Create port forwarding
-            const stream = await new Promise((resolve, reject) => {
-                sshConnection.forwardOut(
-                    '127.0.0.1',
-                    0,
-                    process.env.DB_HOST,
-                    parseInt(process.env.DB_PORT),
-                    (err, stream) => {
-                        if (err) {
-                            console.error('Port forwarding error:', err);
-                            reject(err);
-                            return;
-                        }
-                        console.log('Port forwarding established');
-                        resolve(stream);
-                    }
-                );
-            });
-
-            return stream;
-        } catch (err) {
-            console.error(`SSH tunnel attempt ${attempt + 1}/${retries} failed:`, err);
-            
-            if (attempt === retries - 1) {
-                throw err;
-            }
-            
-            // Wait before retrying
-            await new Promise(resolve => setTimeout(resolve, 1000 * Math.pow(2, attempt)));
+        if (sshConnection) {
+            sshConnection.end();
+            sshConnection = null;
         }
+
+        sshConnection = new Client();
+
+        const stream = await new Promise((resolve, reject) => {
+            sshConnection
+                .on('ready', () => {
+                    console.log('SSH Connection established');
+                    sshConnection.forwardOut(
+                        '127.0.0.1',
+                        0,
+                        process.env.DB_HOST,
+                        parseInt(process.env.DB_PORT),
+                        (err, stream) => {
+                            if (err) {
+                                console.error('Port forwarding error:', err);
+                                reject(err);
+                                return;
+                            }
+                            console.log('Port forwarding established');
+                            resolve(stream);
+                        }
+                    );
+                })
+                .on('error', (err) => {
+                    console.error('SSH Connection error:', err);
+                    reject(err);
+                })
+                .on('end', () => {
+                    console.log('SSH Connection ended normally');
+                })
+                .on('close', () => {
+                    console.log('SSH Connection closed');
+                    if (globalPool) {
+                        handleReconnect();
+                    }
+                })
+                .connect({
+                    host: process.env.SSH_HOST,
+                    port: parseInt(process.env.SSH_PORT),
+                    username: process.env.SSH_USER,
+                    password: process.env.SSH_PASSWORD,
+                    keepaliveInterval: 30000,
+                    keepaliveCountMax: 5,
+                    readyTimeout: 30000,
+                    // Comment out or remove this line to disable debug logs
+                    // debug: (msg) => console.log('SSH Debug:', msg)
+                });
+        });
+
+        return stream;
+    } catch (err) {
+        console.error(`SSH tunnel creation failed (attempt ${retryCount + 1}/${MAX_RETRIES}):`, err);
+        
+        if (retryCount < MAX_RETRIES - 1) {
+            console.log(`Retrying in ${RETRY_DELAY/1000} seconds...`);
+            await new Promise(resolve => setTimeout(resolve, RETRY_DELAY));
+            return createSSHTunnel(retryCount + 1);
+        }
+        
+        throw err;
+    } finally {
+        isConnecting = false;
     }
 };
 
-const getPool = async () => {
+const handleReconnect = async () => {
+    if (reconnectTimeout) {
+        clearTimeout(reconnectTimeout);
+    }
+
+    reconnectTimeout = setTimeout(async () => {
+        try {
+            console.log('Attempting to reconnect...');
+            await getPool(true);
+        } catch (err) {
+            console.error('Reconnection failed:', err);
+        }
+    }, RETRY_DELAY);
+};
+
+const getPool = async (forceNew = false) => {
     try {
-        if (globalPool) {
-            // Test existing connection
+        if (!forceNew && globalPool) {
             try {
                 await globalPool.query('SELECT 1');
                 return globalPool;
@@ -111,8 +117,8 @@ const getPool = async () => {
             }
         }
 
-        console.log('Establishing SSH connection...');
         const stream = await createSSHTunnel();
+        if (!stream) return null;
 
         globalPool = mysql.createPool({
             host: process.env.DB_HOST,
@@ -124,11 +130,13 @@ const getPool = async () => {
             waitForConnections: true,
             connectionLimit: 10,
             queueLimit: 0,
-            connectTimeout: 60000,
-            acquireTimeout: 60000
+            enableKeepAlive: true,
+            keepAliveInitialDelay: 30000,
+            multipleStatements: true,
+            connectTimeout: 60000
         });
 
-        // Test the new connection
+        // Test the connection
         await globalPool.query('SELECT 1');
         console.log('Database connection successful');
 
@@ -137,51 +145,28 @@ const getPool = async () => {
         console.error('Error creating pool:', err);
         if (globalPool) {
             await globalPool.end().catch(console.error);
+            globalPool = null;
         }
-        globalPool = null;
         throw err;
     }
 };
 
-// Function to query the database with retry logic and caching
-const queryWithCacheAndRetry = async (query, params = [], attempts = 3) => {
-    // Check the cache first
-    const cacheKey = query + JSON.stringify(params);
-    const cachedData = cache.get(cacheKey);
-    if (cachedData) {
-        return cachedData;
-    }
-
-    for (let i = 0; i < attempts; i++) {
-        try {
-            const pool = await getPool();
-            const [results] = await pool.query(query, params);
-            
-            // Cache the results to reduce repeated requests
-            cache.set(cacheKey, results);
-
-            return results;
-        } catch (err) {
-            console.error(`Error fetching data (attempt ${i + 1}/${attempts}):`, err);
-            if (err.code === 'ERR_STREAM_WRITE_AFTER_END' || err.code === 'ETIMEDOUT') {
-                console.log('Stream error or timeout, reconnecting...');
-                sshConnection = null; // Reset SSH connection
-                globalPool = null; // Reset pool
-            }
-            if (i === attempts - 1) throw err; // Throw error if max attempts reached
-        }
-    }
-};
-
 const closeConnections = async () => {
+    if (reconnectTimeout) {
+        clearTimeout(reconnectTimeout);
+        reconnectTimeout = null;
+    }
+
     try {
         if (globalPool) {
             await globalPool.end();
             globalPool = null;
+            console.log('Database pool closed');
         }
         if (sshConnection) {
             sshConnection.end();
             sshConnection = null;
+            console.log('SSH connection closed');
         }
     } catch (err) {
         console.error('Error closing connections:', err);
@@ -201,4 +186,4 @@ process.on('uncaughtException', async (err) => {
     process.exit(1);
 });
 
-module.exports = { getPool, closeConnections, queryWithCacheAndRetry };
+module.exports = { getPool, closeConnections };
