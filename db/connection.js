@@ -16,78 +16,80 @@ const dbConfig = {
     port: 3306
 };
 
-let pool = null;
+let globalPool = null;
 
-async function createPool() {
-    return new Promise((resolve, reject) => {
+const getPool = async () => {
+    try {
+        if (globalPool) {
+            return globalPool;
+        }
+
         console.log('Establishing SSH connection...');
-        const ssh = new Client();
+        
+        // Create SSH tunnel
+        const sshConnection = new Client();
+        
+        // Wait for SSH connection
+        await new Promise((resolve, reject) => {
+            sshConnection
+                .on('ready', () => {
+                    console.log('SSH Connection established');
+                    resolve();
+                })
+                .on('error', (err) => {
+                    console.error('SSH Connection error:', err);
+                    reject(err);
+                })
+                .connect(sshConfig);
+        });
 
-        ssh.on('ready', () => {
-            console.log('SSH Connection established');
-
-            ssh.forwardOut(
+        // Create port forward
+        const stream = await new Promise((resolve, reject) => {
+            sshConnection.forwardOut(
                 '127.0.0.1',
                 0,
-                '127.0.0.1',
-                3306,
-                async (err, stream) => {
+                dbConfig.host,
+                dbConfig.port,
+                (err, stream) => {
                     if (err) {
                         console.error('Port forwarding error:', err);
-                        ssh.end();
-                        return reject(err);
-                    }
-
-                    try {
-                        console.log('Port forwarding established');
-                        
-                        const pool = mysql.createPool({
-                            ...dbConfig,
-                            stream: stream,
-                            connectionLimit: 10,
-                            waitForConnections: true,
-                            queueLimit: 0
-                        });
-
-                        // Test the pool
-                        await pool.query('SELECT 1');
-                        console.log('Database connection pool established');
-
-                        // Store SSH client reference
-                        pool.ssh = ssh;
-
-                        resolve(pool);
-
-                    } catch (err) {
-                        console.error('MySQL error:', err);
-                        ssh.end();
                         reject(err);
+                        return;
                     }
+                    console.log('Port forwarding established');
+                    resolve(stream);
                 }
             );
         });
 
-        ssh.on('error', (err) => {
-            console.error('SSH connection error:', err);
-            reject(err);
+        // Create connection pool
+        globalPool = mysql.createPool({
+            ...dbConfig,
+            stream: stream
         });
 
-        ssh.connect(sshConfig);
-    });
-}
+        // Set max listeners for the pool
+        globalPool.setMaxListeners(15);
 
-module.exports = {
-    getPool: async () => {
-        if (!pool) {
-            pool = await createPool();
-        }
-        return pool;
-    },
-    closePool: async () => {
-        if (pool) {
-            await pool.end();
-            pool.ssh.end();
-            pool = null;
-        }
+        // Add pool error handler
+        globalPool.on('error', (err) => {
+            console.error('Pool error:', err);
+            globalPool = null;
+        });
+
+        return globalPool;
+    } catch (err) {
+        console.error('Error creating pool:', err);
+        globalPool = null;
+        throw err;
     }
-}; 
+};
+
+const closePool = async () => {
+    if (globalPool) {
+        await globalPool.end();
+        globalPool = null;
+    }
+};
+
+module.exports = { getPool, closePool }; 

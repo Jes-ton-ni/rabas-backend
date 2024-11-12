@@ -2,6 +2,8 @@ require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
 const { getPool } = require('./db/connection');
+const EventEmitter = require('events');
+EventEmitter.defaultMaxListeners = 15; // Increase global limit if needed
 
 const PORT = process.env.PORT || 3000;
 const app = express();
@@ -32,8 +34,18 @@ app.use(async (req, res, next) => {
     try {
         if (!req.db) {
             console.log('Establishing database connection for request...');
-            req.db = await getPool();
-            console.log('Database connection established for request');
+            const pool = await getPool();
+            
+            // Remove existing listeners before adding new ones
+            pool.removeAllListeners('error');
+            
+            // Add single error handler
+            pool.on('error', async (err) => {
+                console.error('Database connection error:', err);
+                req.db = null;
+            });
+
+            req.db = pool;
         }
         next();
     } catch (err) {
@@ -125,37 +137,61 @@ app.get('/api/businesses', async (req, res) => {
 
 // Endpoint to get all business products
 app.get('/api/getAllBusinessProducts', async (req, res) => {
-    try {
-        const sql = `
-            SELECT 
-                products.*, 
-                MAX(COALESCE(deals.discount, 0)) AS discount, 
-                MAX(COALESCE(deals.expirationDate, 'No Expiration')) AS expiration
-            FROM 
-                products
-            LEFT JOIN 
-                deals 
-            ON 
-                products.product_id = deals.product_id
-            GROUP BY 
-                products.product_id
-            ORDER BY 
-                expiration DESC
-            LIMIT 0, 1000
-        `;
+    const maxRetries = 3;
+    let attempt = 0;
 
-        const [results] = await req.db.query(sql);
-        
-        res.json({
-            success: true,
-            businessProducts: results.length > 0 ? results : []
-        });
-    } catch (err) {
-        console.error('Error fetching business products:', err);
-        res.status(500).json({ 
-            success: false, 
-            message: 'Internal server error' 
-        });
+    while (attempt < maxRetries) {
+        try {
+            if (!req.db) {
+                req.db = await getPool();
+            }
+
+            const sql = `
+                SELECT 
+                    products.*, 
+                    MAX(COALESCE(deals.discount, 0)) AS discount, 
+                    MAX(COALESCE(deals.expirationDate, 'No Expiration')) AS expiration
+                FROM 
+                    products
+                LEFT JOIN 
+                    deals 
+                ON 
+                    products.product_id = deals.product_id
+                GROUP BY 
+                    products.product_id
+                ORDER BY 
+                    expiration DESC
+                LIMIT 0, 1000
+            `;
+
+            const [results] = await req.db.query(sql);
+            
+            return res.json({
+                success: true,
+                businessProducts: results.length > 0 ? results : []
+            });
+        } catch (err) {
+            attempt++;
+            console.error(`Error fetching business products (attempt ${attempt}/${maxRetries}):`, {
+                message: err.message,
+                code: err.code,
+                state: err.sqlState
+            });
+
+            // Reset connection on error
+            req.db = null;
+
+            if (attempt === maxRetries) {
+                return res.status(500).json({ 
+                    success: false, 
+                    message: 'Internal server error',
+                    details: err.message
+                });
+            }
+
+            // Wait before retrying with exponential backoff
+            await new Promise(resolve => setTimeout(resolve, 1000 * Math.pow(2, attempt)));
+        }
     }
 });
 
@@ -211,34 +247,42 @@ app.get('/api/business-applications', async (req, res) => {
 });
 
 app.get('/api/allUsers', async (req, res) => {
-    try {
-        // Verify database connection
-        if (!req.db) {
-            console.error('Database connection not available');
-            return res.status(500).json({ 
-                error: 'Database connection not available',
-                details: 'Connection not established'
-            });
-        }
+    const maxRetries = 3;
+    let attempt = 0;
 
-        const [users] = await req.db.query('SELECT user_id, username, email FROM users');
-        console.log('Successfully fetched users:', users.length);
-        
-        res.json({
-            success: true,
-            users: users
-        });
-    } catch (err) {
-        console.error('Error fetching users:', {
-            message: err.message,
-            code: err.code,
-            state: err.sqlState
-        });
-        
-        res.status(500).json({ 
-            error: 'Failed to fetch users',
-            details: err.message
-        });
+    while (attempt < maxRetries) {
+        try {
+            if (!req.db) {
+                req.db = await getPool();
+            }
+
+            const [users] = await req.db.query('SELECT user_id, username, email FROM users');
+            console.log('Successfully fetched users:', users.length);
+            
+            return res.json({
+                success: true,
+                users: users
+            });
+
+        } catch (err) {
+            attempt++;
+            console.error(`Error fetching users (attempt ${attempt}/${maxRetries}):`, {
+                message: err.message,
+                code: err.code,
+                state: err.sqlState
+            });
+
+            req.db = null;
+
+            if (attempt === maxRetries) {
+                return res.status(500).json({ 
+                    error: 'Failed to fetch users',
+                    details: err.message
+                });
+            }
+
+            await new Promise(resolve => setTimeout(resolve, 1000 * attempt));
+        }
     }
 });
 
