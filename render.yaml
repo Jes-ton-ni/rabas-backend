@@ -1,9 +1,0 @@
-services:
-  - type: web
-    name: your-app-name
-    env: node
-    buildCommand: npm install
-    startCommand: node server.js
-    envVars:
-      - key: NODE_VERSION
-        value: 20.x 
