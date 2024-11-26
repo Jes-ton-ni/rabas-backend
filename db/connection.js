@@ -1,13 +1,10 @@
 const mysql = require('mysql2/promise');
 const { Client } = require('ssh2');
-const session = require('express-session');
-const MySQLStore = require('express-mysql-session')(session);
 
 let globalPool = null;
 let sshConnection = null;
 let isConnecting = false;
 let reconnectTimeout = null;
-let sessionStore = null;
 
 const RETRY_DELAY = 5000; // 5 seconds
 const MAX_RETRIES = 3;
@@ -143,30 +140,6 @@ const getPool = async (forceNew = false) => {
         await globalPool.query('SELECT 1');
         console.log('Database connection successful');
 
-        // MySQL session store configuration
-        if (!sessionStore) {
-            sessionStore = new MySQLStore({
-                database: process.env.SESSION_DB_NAME,
-                table: 'sessions',
-                host: process.env.SESSION_DB_HOST,
-                user: process.env.SESSION_DB_USER,
-                password: process.env.SESSION_DB_PASSWORD,
-                expiration: 86400000, // Session expiration time in milliseconds
-                createDatabaseTable: true, // Automatically create sessions table if not exists
-                schema: {
-                    tableName: 'sessions',
-                    columnNames: {
-                        session_id: 'session_id',
-                        expires: 'expires',
-                        data: 'data'
-                    }
-                }
-            }, globalPool);
-
-            // Log session store configuration
-            console.log('Session store configuration:', sessionStore.options);
-        }
-
         return globalPool;
     } catch (err) {
         console.error('Error creating pool:', err);
@@ -213,4 +186,4 @@ process.on('uncaughtException', async (err) => {
     process.exit(1);
 });
 
-module.exports = { getPool, closeConnections, sessionStore };
+module.exports = { getPool, closeConnections };
