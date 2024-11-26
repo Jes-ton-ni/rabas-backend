@@ -66,7 +66,7 @@ const createSSHTunnel = async (retryCount = 0) => {
                     keepaliveInterval: 30000,
                     keepaliveCountMax: 5,
                     readyTimeout: 30000,
-                    // Comment out or remove this line to disable debug logs
+                    
                     // debug: (msg) => console.log('SSH Debug:', msg)
                 });
         });
